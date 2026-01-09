@@ -228,6 +228,27 @@ async def get_document_image(document_id: UUID, page: int = 1):
             logger.error(f"Failed to render PDF page: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to render PDF: {str(e)}")
 
+    # If it's a HEIC/HEIF image, convert to PNG for browser compatibility
+    if file_path.suffix.lower() in {".heic", ".heif"}:
+        import io
+        import pillow_heif
+        from fastapi.responses import StreamingResponse
+
+        try:
+            heif_file = pillow_heif.read_heif(file_path)
+            image = heif_file.to_pillow()
+            buf = io.BytesIO()
+            image.save(buf, format="PNG")
+            buf.seek(0)
+            return StreamingResponse(
+                buf,
+                media_type="image/png",
+                headers={"X-Converted-From": file_path.suffix.lower()},
+            )
+        except Exception as e:
+            logger.error(f"Failed to convert HEIC/HEIF to PNG: {e}")
+            raise HTTPException(status_code=500, detail="Failed to render image")
+
     return FileResponse(files[0])
 
 

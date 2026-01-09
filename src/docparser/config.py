@@ -22,6 +22,10 @@ class Settings(BaseSettings):
         default=None,
         description="Path to Google Cloud service account JSON",
     )
+    google_cloud_credentials_json: str | None = Field(
+        default=None,
+        description="Google Cloud service account JSON content (for cloud deployments)",
+    )
 
     # OpenAI
     openai_api_key: str = Field(

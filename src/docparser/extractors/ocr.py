@@ -1,9 +1,11 @@
 """Google Cloud Vision OCR extractor."""
 
 import io
+import json
 from pathlib import Path
 
 from google.cloud import vision
+from google.oauth2 import service_account
 from PIL import Image
 import pillow_heif
 
@@ -33,16 +35,24 @@ class OCRExtractor(BaseExtractor):
 
         Args:
             credentials_path: Path to Google Cloud service account JSON.
-                            If None, uses GOOGLE_APPLICATION_CREDENTIALS env var.
+                            If None, uses GOOGLE_APPLICATION_CREDENTIALS env var
+                            or GOOGLE_CLOUD_CREDENTIALS_JSON for cloud deployments.
         """
-        self.credentials_path = credentials_path or get_settings().google_cloud_credentials
+        settings = get_settings()
+        self.credentials_path = credentials_path or settings.google_cloud_credentials
+        self.credentials_json = settings.google_cloud_credentials_json
         self._client: vision.ImageAnnotatorClient | None = None
 
     @property
     def client(self) -> vision.ImageAnnotatorClient:
         """Lazy-load Vision client."""
         if self._client is None:
-            if self.credentials_path:
+            if self.credentials_json:
+                # Use JSON credentials from environment variable (for cloud deployments)
+                credentials_info = json.loads(self.credentials_json)
+                credentials = service_account.Credentials.from_service_account_info(credentials_info)
+                self._client = vision.ImageAnnotatorClient(credentials=credentials)
+            elif self.credentials_path:
                 self._client = vision.ImageAnnotatorClient.from_service_account_file(
                     str(self.credentials_path)
                 )

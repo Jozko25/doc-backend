@@ -222,7 +222,11 @@ async def get_document_image(document_id: UUID, page: int = 1):
             return StreamingResponse(
                 io.BytesIO(img_bytes),
                 media_type="image/png",
-                headers={"X-PDF-Page": str(page), "X-PDF-Total-Pages": str(total_pages)}
+                headers={
+                    "X-PDF-Page": str(page),
+                    "X-PDF-Total-Pages": str(total_pages),
+                    "Cache-Control": "public, max-age=3600",  # Cache for 1 hour
+                }
             )
         except Exception as e:
             logger.error(f"Failed to render PDF page: {e}")
@@ -243,13 +247,19 @@ async def get_document_image(document_id: UUID, page: int = 1):
             return StreamingResponse(
                 buf,
                 media_type="image/png",
-                headers={"X-Converted-From": file_path.suffix.lower()},
+                headers={
+                    "X-Converted-From": file_path.suffix.lower(),
+                    "Cache-Control": "public, max-age=3600",  # Cache for 1 hour
+                },
             )
         except Exception as e:
             logger.error(f"Failed to convert HEIC/HEIF to PNG: {e}")
             raise HTTPException(status_code=500, detail="Failed to render image")
 
-    return FileResponse(files[0])
+    return FileResponse(
+        files[0],
+        headers={"Cache-Control": "public, max-age=3600"},  # Cache for 1 hour
+    )
 
 
 @router.get("/{document_id}/pdf-info")

@@ -1,6 +1,7 @@
 """Configuration management using pydantic-settings."""
 
 from functools import lru_cache
+import json
 from pathlib import Path
 from typing import Iterable
 
@@ -92,7 +93,18 @@ class Settings(BaseSettings):
     def parse_cors_origins(cls, value: str | Iterable[str]) -> list[str]:
         """Allow comma-separated env strings for CORS origins."""
         if isinstance(value, str):
-            return cls._split_csv(value)
+            text = value.strip()
+            if not text:
+                # Empty env var: fall back to defaults without raising
+                return []
+            # Try JSON (e.g., '["https://foo"]'); if it fails, fall back to CSV.
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
+            except Exception:
+                pass
+            return cls._split_csv(text)
         return list(value)
 
     @property

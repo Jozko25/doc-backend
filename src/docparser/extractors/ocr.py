@@ -41,6 +41,13 @@ class OCRExtractor(BaseExtractor):
         settings = get_settings()
         self.credentials_path = credentials_path or settings.google_cloud_credentials
         self.credentials_json = settings.google_cloud_credentials_json
+
+        # Allow inline JSON passed via GOOGLE_CLOUD_CREDENTIALS (not just *_JSON)
+        if self.credentials_path:
+            raw_path = str(self.credentials_path)
+            if raw_path.lstrip().startswith("{"):
+                self.credentials_json = raw_path
+                self.credentials_path = None
         self._client: vision.ImageAnnotatorClient | None = None
 
     @property

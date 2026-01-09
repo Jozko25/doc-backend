@@ -6,13 +6,20 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-router = APIRouter(prefix="/documents", tags=["exports"])
+from ...core.models import CanonicalDocument
+
+exports_router = APIRouter(prefix="/documents", tags=["exports"])
 
 # Reference to document store (same as in documents.py)
 from .documents import _document_store
 
 
-@router.get("/{document_id}/export/{format}")
+# Debug endpoint to list all documents in memory
+@exports_router.get("/debug/list")
+async def list_documents():
+    return {"documents": list(_document_store.keys())}
+
+@exports_router.get("/{document_id}/export/{format}")
 async def export_document(document_id: UUID, format: str) -> StreamingResponse:
     """
     Export document to specified format.
@@ -20,8 +27,8 @@ async def export_document(document_id: UUID, format: str) -> StreamingResponse:
     Supported formats:
     - csv: Comma-separated values (line items)
     - xlsx: Excel spreadsheet
-    - ubl21: UBL 2.1 Invoice XML (future)
-    - en16931: EN 16931 / CII XML (future)
+    - ubl21: UBL 2.1 Invoice XML
+    - en16931: EN 16931 / CII XML
     """
     if document_id not in _document_store:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -56,17 +63,27 @@ async def export_document(document_id: UUID, format: str) -> StreamingResponse:
         )
 
     elif format_lower == "ubl21":
-        # Future: UBL 2.1 exporter
-        raise HTTPException(
-            status_code=501,
-            detail="UBL 2.1 export not yet implemented"
+        from ...exporters import UBLInvoiceExporter
+        exporter = UBLInvoiceExporter()
+        content = exporter.export(doc)
+        return StreamingResponse(
+            io.BytesIO(content),
+            media_type="application/xml",
+            headers={
+                "Content-Disposition": f'attachment; filename="{document_id}_ubl.xml"'
+            },
         )
 
     elif format_lower == "en16931":
-        # Future: EN 16931 exporter
-        raise HTTPException(
-            status_code=501,
-            detail="EN 16931 export not yet implemented"
+        from ...exporters import EN16931Exporter
+        exporter = EN16931Exporter()
+        content = exporter.export(doc)
+        return StreamingResponse(
+            io.BytesIO(content),
+            media_type="application/xml",
+            headers={
+                "Content-Disposition": f'attachment; filename="{document_id}_en16931.xml"'
+            },
         )
 
     elif format_lower == "json":
@@ -84,5 +101,7 @@ async def export_document(document_id: UUID, format: str) -> StreamingResponse:
     else:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported format: {format}. Supported: csv, xlsx, json, ubl21 (future), en16931 (future)"
+            detail=f"Unsupported format: {format}. Supported: csv, xlsx, json, ubl21, en16931"
         )
+
+

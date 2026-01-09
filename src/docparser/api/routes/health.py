@@ -12,7 +12,7 @@ async def health_check() -> dict:
 
     Returns service status and version.
     """
-    from docparser import __version__
+    __version__ = "0.1.0"  # Hardcoded to avoid import issues
 
     return {
         "status": "healthy",

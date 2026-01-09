@@ -143,6 +143,7 @@ class Totals(BaseModel):
     """Document totals."""
 
     subtotal: Decimal = Field(default=Decimal("0"), description="Sum before tax")
+    discount_amount: Decimal | None = Field(default=None, description="Total discount applied")
     tax_breakdown: list[TaxBreakdown] = Field(default_factory=list)
     total_tax: Decimal = Field(default=Decimal("0"))
     shipping_amount: Decimal | None = Field(default=None, description="Shipping/delivery cost")
@@ -194,6 +195,18 @@ class CanonicalDocument(BaseModel):
         populate_by_name = True
 
 
+class BoundingBoxModel(BaseModel):
+    """Bounding box for UI annotations."""
+
+    text: str
+    x: float  # Normalized 0-1
+    y: float
+    width: float
+    height: float
+    confidence: float = 1.0
+    field_path: str | None = None  # JSON path to linked document field (e.g., "totals.total_amount")
+
+
 class ProcessingResult(BaseModel):
     """Result of document processing."""
 
@@ -205,3 +218,6 @@ class ProcessingResult(BaseModel):
     review_required: bool = False
     suggestions: list[AISuggestion] = Field(default_factory=list)
     message: str | None = None
+    bounding_boxes: list[BoundingBoxModel] = Field(default_factory=list)
+    image_width: int | None = None
+    image_height: int | None = None

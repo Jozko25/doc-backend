@@ -2,19 +2,30 @@
 
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..config import get_settings
-from ..extractors import ExcelExtractor, ExtractionResult, OCRExtractor, PDFExtractor, XMLExtractor
+from ..extractors import ExtractionResult, OCRExtractor, PDFExtractor, XMLExtractor
 from ..normalizers import LLMExtractor
 from ..utils.file_handlers import FileHandler, FileType, is_image_type, is_structured_type
 from ..validators import MathValidator, TaxValidator, ValidationResult
 from .models import (
     AISuggestion,
+    BoundingBoxModel,
     CanonicalDocument,
     ProcessingResult,
     ValidationStatus,
 )
+
+# Lazy import for ExcelExtractor to avoid pandas import issues with Python 3.14
+if TYPE_CHECKING:
+    from ..extractors.excel import ExcelExtractor
+
+
+def _get_excel_extractor():
+    """Lazy load ExcelExtractor to avoid pandas import at module load."""
+    from ..extractors.excel import ExcelExtractor
+    return ExcelExtractor()
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +41,7 @@ class DocumentPipeline:
         self,
         ocr_extractor: OCRExtractor | None = None,
         pdf_extractor: PDFExtractor | None = None,
-        excel_extractor: ExcelExtractor | None = None,
+        excel_extractor: "ExcelExtractor | None" = None,
         xml_extractor: XMLExtractor | None = None,
         llm_extractor: LLMExtractor | None = None,
         math_validator: MathValidator | None = None,
@@ -45,7 +56,7 @@ class DocumentPipeline:
 
         self.ocr_extractor = ocr_extractor or OCRExtractor()
         self.pdf_extractor = pdf_extractor or PDFExtractor()
-        self.excel_extractor = excel_extractor or ExcelExtractor()
+        self._excel_extractor = excel_extractor  # Lazy loaded
         self.xml_extractor = xml_extractor or XMLExtractor()
         self.math_validator = math_validator or MathValidator()
         self.tax_validator = tax_validator or TaxValidator()
@@ -56,6 +67,13 @@ class DocumentPipeline:
 
         self.max_retries = settings.max_validation_retries
         self.file_handler = FileHandler(settings.max_file_size_bytes)
+
+    @property
+    def excel_extractor(self):
+        """Lazy load ExcelExtractor on first access."""
+        if self._excel_extractor is None:
+            self._excel_extractor = _get_excel_extractor()
+        return self._excel_extractor
 
     async def process(
         self,
@@ -123,6 +141,11 @@ class DocumentPipeline:
         # Step 6: Build final result
         processing_time_ms = int((time.time() - start_time) * 1000)
 
+        # Convert bounding boxes to model format and link to document fields
+        bounding_boxes = self._link_bounding_boxes_to_fields(
+            extraction_result.bounding_boxes, canonical_doc
+        )
+
         if validation_result.is_valid:
             canonical_doc.metadata.validation_status = ValidationStatus.VALID
             return ProcessingResult(
@@ -134,6 +157,9 @@ class DocumentPipeline:
                 review_required=False,
                 suggestions=[],
                 message="Document processed and validated successfully.",
+                bounding_boxes=bounding_boxes,
+                image_width=extraction_result.image_width,
+                image_height=extraction_result.image_height,
             )
         else:
             # Build suggestions from validation errors
@@ -155,6 +181,9 @@ class DocumentPipeline:
                     "Document processed but some values could not be verified. "
                     "Please review the highlighted fields before export."
                 ),
+                bounding_boxes=bounding_boxes,
+                image_width=extraction_result.image_width,
+                image_height=extraction_result.image_height,
             )
 
     async def _extract(
@@ -388,3 +417,171 @@ class DocumentPipeline:
             suggestions=[],
             message=error,
         )
+
+    def _link_bounding_boxes_to_fields(
+        self,
+        raw_boxes: list,
+        doc: CanonicalDocument,
+    ) -> list[BoundingBoxModel]:
+        """
+        Link bounding boxes to document fields by matching text values.
+
+        This enables automatic syncing when annotations are edited.
+        """
+        from decimal import Decimal
+        import re
+
+        # Build a map of field values to their paths
+        # We add multiple format variants for each value to improve matching
+        field_map: dict[str, str] = {}
+
+        def add_number_variants(value: Decimal | None, field_path: str):
+            """Add multiple format variants for a number to improve OCR matching."""
+            if value is None:
+                return
+            # Normalized form (e.g., "86.99")
+            normalized = str(value.normalize())
+            field_map[normalized] = field_path
+            # With comma as decimal separator (European: "86,99")
+            field_map[normalized.replace('.', ',')] = field_path
+            # Without trailing zeros
+            try:
+                clean = str(Decimal(normalized).quantize(Decimal('0.01')))
+                field_map[clean] = field_path
+                field_map[clean.replace('.', ',')] = field_path
+            except Exception:
+                pass
+            # Integer form if whole number
+            if value == value.to_integral_value():
+                field_map[str(int(value))] = field_path
+
+        def add_text_variants(value: str | None, field_path: str):
+            """Add text value and common variants."""
+            if not value:
+                return
+            stripped = value.strip()
+            field_map[stripped] = field_path
+            # Also add individual words for multi-word values (helps with OCR word splitting)
+            words = stripped.split()
+            if len(words) > 1:
+                for word in words:
+                    clean_word = word.strip('.,;:')
+                    if len(clean_word) > 3:  # Only meaningful words
+                        # Don't overwrite existing mappings with partial matches
+                        if clean_word not in field_map:
+                            field_map[clean_word] = field_path
+
+        # Add totals fields (with priority - add unique values first)
+        if doc.totals:
+            totals = doc.totals
+            # Add in order of priority (most specific first)
+            add_number_variants(totals.total_tax, "totals.total_tax")
+            add_number_variants(totals.subtotal, "totals.subtotal")
+            add_number_variants(totals.total_amount, "totals.total_amount")
+            add_number_variants(totals.amount_due, "totals.amount_due")
+
+        # Add document info fields
+        if doc.document:
+            add_text_variants(doc.document.number, "document.number")
+            # Add date variants
+            if doc.document.issue_date:
+                date_str = str(doc.document.issue_date)
+                field_map[date_str] = "document.issue_date"
+                # Common date formats
+                field_map[date_str.replace('-', '.')] = "document.issue_date"
+                field_map[date_str.replace('-', '/')] = "document.issue_date"
+            if doc.document.due_date:
+                date_str = str(doc.document.due_date)
+                field_map[date_str] = "document.due_date"
+                field_map[date_str.replace('-', '.')] = "document.due_date"
+                field_map[date_str.replace('-', '/')] = "document.due_date"
+            # Currency
+            if doc.document.currency:
+                field_map[doc.document.currency] = "document.currency"
+
+        # Add party fields
+        for party_type in ["supplier", "customer"]:
+            party = getattr(doc, party_type, None)
+            if party:
+                add_text_variants(party.name, f"{party_type}.name")
+                add_text_variants(party.tax_id, f"{party_type}.tax_id")
+                # IBAN
+                if party.bank and party.bank.iban:
+                    add_text_variants(party.bank.iban, f"{party_type}.bank.iban")
+
+        # Add line item fields
+        for i, item in enumerate(doc.line_items or []):
+            add_text_variants(item.description, f"line_items[{i}].description")
+            add_number_variants(item.quantity, f"line_items[{i}].quantity")
+            add_number_variants(item.unit_price, f"line_items[{i}].unit_price")
+            add_number_variants(item.line_total, f"line_items[{i}].line_total")
+            add_number_variants(item.tax_amount, f"line_items[{i}].tax_amount")
+            add_number_variants(item.tax_rate, f"line_items[{i}].tax_rate")
+
+        logger.debug(f"Field map has {len(field_map)} entries for linking")
+
+        # Now link bounding boxes to fields (only first match per field)
+        used_fields: set[str] = set()
+        result = []
+        for box in raw_boxes:
+            box_text = box.text.strip()
+            normalized_text = self._normalize_number_text(box_text)
+
+            # Try to find a matching field (try multiple formats)
+            field_path = (
+                field_map.get(normalized_text) or
+                field_map.get(box_text) or
+                field_map.get(box_text.replace('.', ',')) or
+                field_map.get(box_text.replace(',', '.'))
+            )
+
+            # Only assign field_path if this field hasn't been used yet
+            if field_path and field_path in used_fields:
+                field_path = None  # Don't link duplicate matches
+            elif field_path:
+                used_fields.add(field_path)
+                logger.debug(f"Linked box '{box_text}' to {field_path}")
+
+            result.append(BoundingBoxModel(
+                text=box.text,
+                x=box.x,
+                y=box.y,
+                width=box.width,
+                height=box.height,
+                confidence=box.confidence,
+                field_path=field_path,
+            ))
+
+        logger.info(f"Linked {len(used_fields)} bounding boxes to document fields")
+        return result
+
+    def _normalize_number(self, value: Any) -> str:
+        """Normalize a numeric value for comparison."""
+        from decimal import Decimal
+
+        if isinstance(value, Decimal):
+            # Remove trailing zeros and convert to string
+            normalized = value.normalize()
+            return str(normalized)
+        return str(value)
+
+    def _normalize_number_text(self, text: str) -> str:
+        """Normalize text that might be a number for comparison."""
+        import re
+
+        # Remove common currency symbols and whitespace
+        cleaned = re.sub(r'[€$£¥\s]', '', text)
+
+        # Handle comma as decimal separator (European format)
+        if ',' in cleaned and '.' not in cleaned:
+            cleaned = cleaned.replace(',', '.')
+        elif ',' in cleaned and '.' in cleaned:
+            # Assume comma is thousands separator
+            cleaned = cleaned.replace(',', '')
+
+        # Try to parse as decimal and normalize
+        try:
+            from decimal import Decimal
+            return str(Decimal(cleaned).normalize())
+        except Exception:
+            return text

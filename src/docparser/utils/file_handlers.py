@@ -17,6 +17,7 @@ class FileType(str, Enum):
     IMAGE_PNG = "image_png"
     IMAGE_TIFF = "image_tiff"
     IMAGE_WEBP = "image_webp"
+    IMAGE_HEIC = "image_heic"
     IMAGE_OTHER = "image_other"
     PDF = "pdf"
     EXCEL_XLSX = "excel_xlsx"
@@ -32,6 +33,8 @@ MIME_TO_FILETYPE: dict[str, FileType] = {
     "image/png": FileType.IMAGE_PNG,
     "image/tiff": FileType.IMAGE_TIFF,
     "image/webp": FileType.IMAGE_WEBP,
+    "image/heic": FileType.IMAGE_HEIC,
+    "image/heif": FileType.IMAGE_HEIC,
     "image/gif": FileType.IMAGE_OTHER,
     "image/bmp": FileType.IMAGE_OTHER,
     "application/pdf": FileType.PDF,
@@ -51,6 +54,8 @@ EXTENSION_TO_FILETYPE: dict[str, FileType] = {
     ".tiff": FileType.IMAGE_TIFF,
     ".tif": FileType.IMAGE_TIFF,
     ".webp": FileType.IMAGE_WEBP,
+    ".heic": FileType.IMAGE_HEIC,
+    ".heif": FileType.IMAGE_HEIC,
     ".gif": FileType.IMAGE_OTHER,
     ".bmp": FileType.IMAGE_OTHER,
     ".pdf": FileType.PDF,
@@ -107,6 +112,7 @@ def is_image_type(file_type: FileType) -> bool:
         FileType.IMAGE_PNG,
         FileType.IMAGE_TIFF,
         FileType.IMAGE_WEBP,
+        FileType.IMAGE_HEIC,
         FileType.IMAGE_OTHER,
     }
 

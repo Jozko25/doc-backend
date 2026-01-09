@@ -47,7 +47,7 @@ def create_app() -> FastAPI:
     # Include routers
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(documents_router, prefix="/api/v1")
-    app.include_router(exports_router, prefix="/api/v1")
+    app.include_router(exports_router, prefix="/api/v1/exports")
 
     @app.on_event("startup")
     async def startup_event():
@@ -76,3 +76,6 @@ if __name__ == "__main__":
         port=settings.port,
         reload=settings.debug,
     )
+
+for route in app.routes:
+    print(route.path, route.methods)

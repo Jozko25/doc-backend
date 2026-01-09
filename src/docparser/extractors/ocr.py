@@ -4,10 +4,15 @@ import io
 from pathlib import Path
 
 from google.cloud import vision
+from PIL import Image
+import pillow_heif
+
+# Register HEIC opener
+pillow_heif.register_heif_opener()
 
 from ..config import get_settings
 from ..utils.file_handlers import FileType
-from .base import BaseExtractor, ExtractionResult
+from .base import BaseExtractor, BoundingBox, ExtractionResult
 
 
 class OCRExtractor(BaseExtractor):
@@ -18,6 +23,7 @@ class OCRExtractor(BaseExtractor):
         FileType.IMAGE_PNG,
         FileType.IMAGE_TIFF,
         FileType.IMAGE_WEBP,
+        FileType.IMAGE_HEIC,
         FileType.IMAGE_OTHER,
     }
 
@@ -58,6 +64,25 @@ class OCRExtractor(BaseExtractor):
         """
         settings = get_settings()
 
+        # Check for HEIC and convert if necessary
+        is_converted = False
+        try:
+            # Quick check if it might be HEIC/HEIF
+            if len(content) > 12:
+                # Check magic bytes for typical HEIC/HEIF files
+                # ftypheic, ftypheix, ftypmsf1, ftypmif1, etc.
+                # Simplest is to try opening with PIL since we registered the opener
+                with Image.open(io.BytesIO(content)) as img:
+                    if img.format in ("HEIC", "HEIF"):
+                        # Convert to PNG
+                        output = io.BytesIO()
+                        img.save(output, format="PNG")
+                        content = output.getvalue()
+                        is_converted = True
+        except Exception:
+            # If it fails, proceed with original content (might be a different valid format)
+            pass
+
         # Create vision image from bytes
         image = vision.Image(content=content)
 
@@ -81,19 +106,52 @@ class OCRExtractor(BaseExtractor):
                 source_type="ocr_error",
             )
 
-        # Extract full text
+        # Extract full text and bounding boxes
         full_text = ""
         confidence_sum = 0.0
         confidence_count = 0
+        bounding_boxes: list[BoundingBox] = []
+        image_width = 0
+        image_height = 0
 
         if response.full_text_annotation:
             full_text = response.full_text_annotation.text
 
-            # Calculate average confidence from pages
+            # Get image dimensions and word-level bounding boxes
             for page in response.full_text_annotation.pages:
+                image_width = page.width
+                image_height = page.height
+
                 for block in page.blocks:
                     confidence_sum += block.confidence
                     confidence_count += 1
+
+                    for paragraph in block.paragraphs:
+                        for word in paragraph.words:
+                            # Get word text
+                            word_text = "".join(
+                                symbol.text for symbol in word.symbols
+                            )
+
+                            # Get bounding box vertices
+                            vertices = word.bounding_box.vertices
+                            if len(vertices) >= 4:
+                                # Calculate normalized coordinates (0-1)
+                                x_coords = [v.x for v in vertices]
+                                y_coords = [v.y for v in vertices]
+                                min_x = min(x_coords)
+                                max_x = max(x_coords)
+                                min_y = min(y_coords)
+                                max_y = max(y_coords)
+
+                                bounding_boxes.append(BoundingBox(
+                                    text=word_text,
+                                    x=min_x / image_width if image_width else 0,
+                                    y=min_y / image_height if image_height else 0,
+                                    width=(max_x - min_x) / image_width if image_width else 0,
+                                    height=(max_y - min_y) / image_height if image_height else 0,
+                                    confidence=word.confidence if hasattr(word, 'confidence') else 1.0,
+                                ))
 
         avg_confidence = confidence_sum / confidence_count if confidence_count > 0 else 0.0
 
@@ -108,6 +166,9 @@ class OCRExtractor(BaseExtractor):
             confidence=avg_confidence,
             warnings=warnings,
             source_type="google_cloud_vision",
+            bounding_boxes=bounding_boxes,
+            image_width=image_width,
+            image_height=image_height,
         )
 
     def supports_file_type(self, file_type: str) -> bool:

@@ -104,73 +104,88 @@ class MathValidator:
     def _validate_line_items(self, doc, is_us_style: bool) -> ValidationResult:
         """Validate each line item's calculations."""
         errors = []
+        warnings = []
 
         for item in doc.line_items:
-            # Calculate expected net amount (quantity × unit price)
-            expected_net = item.quantity * item.unit_price
+            # Calculate expected amount (quantity × unit price)
+            expected_gross = item.quantity * item.unit_price
 
             # Apply discount if present
             if item.discount_percent:
-                discount = expected_net * (item.discount_percent / Decimal("100"))
-                expected_net -= discount
+                discount = expected_gross * (item.discount_percent / Decimal("100"))
+                expected_gross -= discount
             elif item.discount_amount:
-                expected_net -= item.discount_amount
+                expected_gross -= item.discount_amount
 
             if is_us_style:
-                # US-style: line_total should equal net (pre-tax)
-                if not self._is_close(item.line_total, expected_net):
+                # US-style: line_total should equal qty × price (pre-tax)
+                if not self._is_close(item.line_total, expected_gross):
                     errors.append(
                         f"Line {item.line_number}: Total {item.line_total} doesn't match "
-                        f"expected {expected_net:.2f} (qty {item.quantity} × price {item.unit_price})"
+                        f"expected {expected_gross:.2f} (qty {item.quantity} × price {item.unit_price})"
                     )
             else:
-                # EU-style: line_total = net + tax
+                # EU-style receipts: Two possible interpretations
+                # 1. unit_price is NET price -> line_total = net + tax
+                # 2. unit_price is GROSS price (tax-inclusive) -> line_total = qty × price
+
+                # First check if qty × price ≈ line_total (gross pricing, common for receipts)
+                if self._is_close(item.line_total, expected_gross):
+                    # Gross pricing - this is valid
+                    continue
+
+                # Otherwise check net + tax calculation
                 if item.tax_rate is not None:
-                    expected_tax = expected_net * (item.tax_rate / Decimal("100"))
-                else:
-                    expected_tax = Decimal("0")
+                    expected_tax = expected_gross * (item.tax_rate / Decimal("100"))
+                    expected_total_with_tax = expected_gross + expected_tax
 
-                expected_total = expected_net + expected_tax
+                    if self._is_close(item.line_total, expected_total_with_tax):
+                        # Net pricing with tax added - this is valid
+                        continue
 
-                # Check tax amount
-                if item.tax_rate is not None and not self._is_close(item.tax_amount, expected_tax):
-                    errors.append(
-                        f"Line {item.line_number}: Tax amount {item.tax_amount} doesn't match "
-                        f"expected {expected_tax:.2f} ({item.tax_rate}% of {expected_net:.2f})"
-                    )
+                # Neither interpretation works - report as warning (not error)
+                # because receipts have many formats
+                warnings.append(
+                    f"Line {item.line_number}: Total {item.line_total} doesn't match "
+                    f"qty × price ({expected_gross:.2f})"
+                )
 
-                # Check line total
-                if not self._is_close(item.line_total, expected_total):
-                    errors.append(
-                        f"Line {item.line_number}: Total {item.line_total} doesn't match "
-                        f"expected {expected_total:.2f} (net {expected_net:.2f} + tax {expected_tax:.2f})"
-                    )
-
-        return ValidationResult(is_valid=len(errors) == 0, errors=errors)
+        return ValidationResult(is_valid=len(errors) == 0, errors=errors, warnings=warnings)
 
     def _validate_subtotal(self, doc, is_us_style: bool) -> ValidationResult:
         """Validate that subtotal matches sum of line items."""
-        errors = []
+        warnings = []
 
         if not doc.line_items:
             return ValidationResult(is_valid=True)
 
+        line_total_sum = sum(item.line_total for item in doc.line_items)
+
         if is_us_style:
             # US-style: subtotal = sum of line_total (which are pre-tax)
-            calculated_subtotal = sum(item.line_total for item in doc.line_items)
+            if not self._is_close(doc.totals.subtotal, line_total_sum):
+                warnings.append(
+                    f"Subtotal mismatch: Document shows {doc.totals.subtotal}, "
+                    f"but sum of line items is {line_total_sum:.2f}"
+                )
         else:
-            # EU-style: subtotal = sum of (line_total - tax_amount)
-            calculated_subtotal = sum(
-                item.line_total - item.tax_amount for item in doc.line_items
-            )
+            # EU-style receipts: subtotal is the taxable BASE (ZÁKLAD), not sum of line totals
+            # For receipts: subtotal + total_tax ≈ total_amount
+            # We verify this relationship instead of line item sums
+            expected_total = doc.totals.subtotal + doc.totals.total_tax
+            rounding = doc.totals.rounding_amount or Decimal("0")
 
-        if not self._is_close(doc.totals.subtotal, calculated_subtotal):
-            errors.append(
-                f"Subtotal mismatch: Document shows {doc.totals.subtotal}, "
-                f"but sum of line items is {calculated_subtotal:.2f}"
-            )
+            # Check: subtotal + tax + rounding ≈ total_amount
+            if not self._is_close(doc.totals.total_amount, expected_total + rounding):
+                # Also check if subtotal + tax ≈ line_total_sum (tax-inclusive lines)
+                if not self._is_close(expected_total, line_total_sum):
+                    warnings.append(
+                        f"Subtotal relationship unclear: subtotal ({doc.totals.subtotal}) + "
+                        f"tax ({doc.totals.total_tax}) = {expected_total:.2f}, "
+                        f"but total is {doc.totals.total_amount}"
+                    )
 
-        return ValidationResult(is_valid=len(errors) == 0, errors=errors)
+        return ValidationResult(is_valid=True, warnings=warnings)
 
     def _validate_us_style_tax(self, doc) -> ValidationResult:
         """Validate US-style tax (lump sum at bottom)."""
@@ -199,29 +214,29 @@ class MathValidator:
         return ValidationResult(is_valid=len(errors) == 0, errors=errors, warnings=warnings)
 
     def _validate_eu_style_tax(self, doc) -> ValidationResult:
-        """Validate EU-style tax (per line item)."""
-        errors = []
+        """Validate EU-style tax (per line item or from breakdown)."""
         warnings = []
 
-        # Check tax breakdown
+        # Check tax breakdown if present
         for tax in doc.totals.tax_breakdown:
             expected_tax = tax.taxable_amount * (tax.rate / Decimal("100"))
 
             if not self._is_close(tax.tax_amount, expected_tax):
-                errors.append(
-                    f"Tax breakdown error: {tax.rate}% of {tax.taxable_amount} should be "
-                    f"{expected_tax:.2f}, but document shows {tax.tax_amount}"
+                warnings.append(
+                    f"Tax breakdown: {tax.rate}% of {tax.taxable_amount} = "
+                    f"{expected_tax:.2f}, document shows {tax.tax_amount}"
                 )
 
-        # Check total tax matches sum from line items
+        # For receipts, line items often don't have individual tax amounts
+        # The tax is shown in the breakdown at the bottom
         line_tax_sum = sum(item.tax_amount for item in doc.line_items)
-        if not self._is_close(doc.totals.total_tax, line_tax_sum):
+        if line_tax_sum > 0 and not self._is_close(doc.totals.total_tax, line_tax_sum):
             warnings.append(
                 f"Total tax {doc.totals.total_tax} differs from sum of "
                 f"line item taxes {line_tax_sum:.2f}"
             )
 
-        return ValidationResult(is_valid=len(errors) == 0, errors=errors, warnings=warnings)
+        return ValidationResult(is_valid=True, warnings=warnings)
 
     def _validate_grand_total(self, doc, is_us_style: bool) -> ValidationResult:
         """Validate grand total = subtotal + tax + shipping."""

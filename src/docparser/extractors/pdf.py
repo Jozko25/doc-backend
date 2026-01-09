@@ -5,7 +5,7 @@ import io
 import fitz  # PyMuPDF
 
 from ..utils.file_handlers import FileType
-from .base import BaseExtractor, ExtractionResult
+from .base import BaseExtractor, BoundingBox, ExtractionResult
 
 
 class PDFExtractor(BaseExtractor):
@@ -18,7 +18,7 @@ class PDFExtractor(BaseExtractor):
 
     async def extract(self, content: bytes, filename: str | None = None) -> ExtractionResult:
         """
-        Extract text from PDF.
+        Extract text from PDF with bounding boxes.
 
         For PDFs with embedded text (native PDFs), extracts the text directly.
         For scanned PDFs with little/no text, returns empty result (should use OCR).
@@ -28,10 +28,13 @@ class PDFExtractor(BaseExtractor):
             filename: Original filename (unused)
 
         Returns:
-            ExtractionResult with extracted text
+            ExtractionResult with extracted text and bounding boxes
         """
         warnings = []
         all_text = []
+        bounding_boxes = []
+        page_width = None
+        page_height = None
 
         try:
             # Open PDF from bytes
@@ -39,10 +42,45 @@ class PDFExtractor(BaseExtractor):
             doc = fitz.open(stream=pdf_stream, filetype="pdf")
 
             for page_num, page in enumerate(doc):
-                # Extract text from page
-                text = page.get_text("text")
+                # Get page dimensions (use first page for reference)
+                if page_width is None:
+                    rect = page.rect
+                    page_width = rect.width
+                    page_height = rect.height
+
+                # Extract text with layout preservation
+                # Using "text" with sort=True to maintain reading order
+                # Also try blocks to get structured text
+                text_blocks = page.get_text("blocks", sort=True)
+
+                # Reconstruct text preserving table structure
+                lines = []
+                for block in text_blocks:
+                    if block[6] == 0:  # Text block (not image)
+                        block_text = block[4].strip()
+                        if block_text:
+                            lines.append(block_text)
+
+                text = "\n".join(lines)
                 if text.strip():
                     all_text.append(f"--- Page {page_num + 1} ---\n{text}")
+
+                # Extract words with positions (only for first page for now)
+                if page_num == 0:
+                    words = page.get_text("words")  # Returns list of (x0, y0, x1, y1, word, block_no, line_no, word_no)
+                    for word_data in words:
+                        x0, y0, x1, y1, word_text = word_data[:5]
+                        if word_text.strip():
+                            # Normalize coordinates to 0-1 range
+                            bbox = BoundingBox(
+                                text=word_text,
+                                x=x0 / page_width,
+                                y=y0 / page_height,
+                                width=(x1 - x0) / page_width,
+                                height=(y1 - y0) / page_height,
+                                confidence=1.0,  # Native PDF text is 100% accurate
+                            )
+                            bounding_boxes.append(bbox)
 
             doc.close()
 
@@ -59,6 +97,7 @@ class PDFExtractor(BaseExtractor):
         is_scanned = False
         if full_text is None or len(full_text.strip()) < self.MIN_TEXT_LENGTH:
             is_scanned = True
+            bounding_boxes = []  # No bounding boxes for scanned PDFs
             warnings.append(
                 "PDF appears to be scanned or image-based. "
                 "OCR extraction recommended for better results."
@@ -66,9 +105,12 @@ class PDFExtractor(BaseExtractor):
 
         return ExtractionResult(
             text=full_text,
-            confidence=1.0 if not is_scanned else 0.0,  # Native PDFs have perfect accuracy
+            confidence=1.0 if not is_scanned else 0.0,
             warnings=warnings,
             source_type="pdf_native" if not is_scanned else "pdf_scanned",
+            bounding_boxes=bounding_boxes,
+            image_width=int(page_width * 2) if page_width else None,  # 2x for rendered image resolution
+            image_height=int(page_height * 2) if page_height else None,
         )
 
     def supports_file_type(self, file_type: str) -> bool:
@@ -94,7 +136,7 @@ class PDFExtractor(BaseExtractor):
 
     async def extract_with_images(self, content: bytes) -> tuple[ExtractionResult, list[bytes]]:
         """
-        Extract text and images from PDF.
+        Extract text, bounding boxes, and images from PDF.
 
         For scanned PDFs, the images can be sent to OCR.
 
@@ -107,16 +149,51 @@ class PDFExtractor(BaseExtractor):
         warnings = []
         all_text = []
         images = []
+        bounding_boxes = []
+        page_width = None
+        page_height = None
 
         try:
             pdf_stream = io.BytesIO(content)
             doc = fitz.open(stream=pdf_stream, filetype="pdf")
 
             for page_num, page in enumerate(doc):
-                # Extract text
-                text = page.get_text("text")
+                # Get page dimensions (use first page for reference)
+                if page_width is None:
+                    rect = page.rect
+                    page_width = rect.width
+                    page_height = rect.height
+
+                # Extract text with layout preservation using blocks
+                text_blocks = page.get_text("blocks", sort=True)
+
+                # Reconstruct text preserving table structure
+                lines = []
+                for block in text_blocks:
+                    if block[6] == 0:  # Text block (not image)
+                        block_text = block[4].strip()
+                        if block_text:
+                            lines.append(block_text)
+
+                text = "\n".join(lines)
                 if text.strip():
                     all_text.append(f"--- Page {page_num + 1} ---\n{text}")
+
+                # Extract words with positions (only for first page for now)
+                if page_num == 0:
+                    words = page.get_text("words")
+                    for word_data in words:
+                        x0, y0, x1, y1, word_text = word_data[:5]
+                        if word_text.strip():
+                            bbox = BoundingBox(
+                                text=word_text,
+                                x=x0 / page_width,
+                                y=y0 / page_height,
+                                width=(x1 - x0) / page_width,
+                                height=(y1 - y0) / page_height,
+                                confidence=1.0,
+                            )
+                            bounding_boxes.append(bbox)
 
                 # Extract images from page
                 image_list = page.get_images(full=True)
@@ -141,10 +218,14 @@ class PDFExtractor(BaseExtractor):
         is_scanned = len(full_text or "") < self.MIN_TEXT_LENGTH and len(images) > 0
         if is_scanned:
             warnings.append("PDF appears to be scanned. Extracted page images for OCR.")
+            bounding_boxes = []  # Clear bounding boxes for scanned PDFs
 
         return ExtractionResult(
             text=full_text,
             confidence=1.0 if not is_scanned else 0.1,
             warnings=warnings,
             source_type="pdf_native" if not is_scanned else "pdf_scanned",
+            bounding_boxes=bounding_boxes,
+            image_width=int(page_width * 2) if page_width else None,  # 2x for rendered image
+            image_height=int(page_height * 2) if page_height else None,
         ), images

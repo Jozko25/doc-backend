@@ -59,6 +59,10 @@ class Settings(BaseSettings):
         le=500,
         description="Maximum file size in MB",
     )
+    upload_dir: Path = Field(
+        default=Path("uploads"),
+        description="Directory to store uploaded documents",
+    )
 
     # Server Settings
     host: str = Field(default="0.0.0.0")

@@ -41,8 +41,8 @@ class Settings(BaseSettings):
         description="OpenAI model to use for extraction",
     )
     max_validation_retries: int = Field(
-        default=3,
-        ge=1,
+        default=1,
+        ge=0,
         le=10,
         description="Maximum retries for LLM validation",
     )

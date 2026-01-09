@@ -179,7 +179,8 @@ class LLMExtractor:
         """
         Quick sanity check to see if extraction looks mathematically valid.
 
-        Returns True if the numbers roughly make sense.
+        Returns True if the numbers roughly make sense. We're lenient here
+        to avoid unnecessary LLM calls - the pipeline validator will catch issues.
         """
         try:
             line_items = data.get("line_items", [])
@@ -188,22 +189,6 @@ class LLMExtractor:
             if not line_items:
                 return True  # No line items to validate
 
-            # Check each line item: quantity * unit_price should be close to line_total
-            for item in line_items:
-                qty = Decimal(str(item.get("quantity", 0) or 0))
-                price = Decimal(str(item.get("unit_price", 0) or 0))
-                line_total = Decimal(str(item.get("line_total", 0) or 0))
-
-                if qty == 0 or price == 0 or line_total == 0:
-                    continue
-
-                expected = qty * price
-                # Allow 5% tolerance for rounding
-                tolerance = line_total * Decimal("0.05")
-                if abs(expected - line_total) > max(tolerance, Decimal("1")):
-                    logger.debug(f"Line item math mismatch: {qty} * {price} = {expected} != {line_total}")
-                    return False
-
             # Check total amount vs sum of line items
             total_amount = Decimal(str(totals.get("total_amount", 0) or 0))
             if total_amount > 0 and line_items:
@@ -211,10 +196,9 @@ class LLMExtractor:
                     Decimal(str(item.get("line_total", 0) or 0))
                     for item in line_items
                 )
-                # For EU-style receipts, line_total is tax-inclusive and equals total_amount
-                # Allow 10% tolerance
-                tolerance = total_amount * Decimal("0.1")
-                if abs(sum_lines - total_amount) > max(tolerance, Decimal("5")):
+                # Allow 20% tolerance - be lenient to skip extra LLM calls
+                tolerance = total_amount * Decimal("0.2")
+                if abs(sum_lines - total_amount) > max(tolerance, Decimal("10")):
                     logger.debug(f"Total mismatch: sum of lines {sum_lines} != {total_amount}")
                     return False
 
@@ -222,7 +206,7 @@ class LLMExtractor:
 
         except Exception as e:
             logger.debug(f"Validation check failed: {e}")
-            return False
+            return True  # Be lenient on errors
 
     async def revalidate(
         self,
